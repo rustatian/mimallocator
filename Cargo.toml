@@ -9,3 +9,7 @@ edition = "2018"
 [dependencies]
 
 [lib]
+
+[features]
+MI_ENCODE_FREELIST = []
+MI_PADDING = []
