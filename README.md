@@ -28,3 +28,13 @@ struct X {
     has_aligned: bool,
 }
 ```
+2. Preprocessor features: [Rust_Forum](https://users.rust-lang.org/t/ifdef-like-feature/1753/15)
+
+C: (just sample)
+```C
+#if INTPTR_MAX == 9223372036854775807LL
+# define A (3)
+#else A(2)
+```
+
+Rust: Might be I don't have enough Rust knowledge at the moment to re-implement such features in Rust.
