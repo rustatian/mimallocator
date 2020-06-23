@@ -3,9 +3,9 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-const MI_SMALL_WSIZE_MAX: usize = 128;
+const MI_SMALL_WSIZE_MAX: isize = 128;
 #[cfg(target_arch = "x86_64")]
-const MI_SMALL_SIZE_MAX: usize = MI_SMALL_WSIZE_MAX * 8;
+const MI_SMALL_SIZE_MAX: isize = MI_SMALL_WSIZE_MAX * 8;
 
 #[cfg(target_arch = "x86")]
 const MI_SMALL_SIZE_MAX: usize = MI_SMALL_WSIZE_MAX * 4;
@@ -13,29 +13,39 @@ const MI_SMALL_SIZE_MAX: usize = MI_SMALL_WSIZE_MAX * 4;
 #[cfg(target_feature = "MI_PADDING")]
 pub const MI_PADDING_SIZE: usize = std::mem::size_of::<MiPaddingS>();
 
+const INTPTR_MAX: isize = isize::MAX;
+const MI_INTPTR_SHIFT: u8 = 3;
+const MI_INTPTR_SIZE: isize = 1 << MI_INTPTR_SHIFT;
+const MI_INTPTR_BITS: isize = MI_INTPTR_SIZE * 8;
+
+const MI_PADDING_WSIZE: isize = (MI_PADDING_SIZE + MI_INTPTR_SIZE - 1) / MI_INTPTR_SIZE;
+const MI_PAGES_DIRECT: isize = MI_SMALL_WSIZE_MAX + MI_PADDING_WSIZE + 1;
+const KI_B: usize = 1024;
+const MI_B: usize = KI_B * KI_B;
+const GI_B: usize = MI_B * KI_B;
+
 #[cfg(target_feature = "MI_PADDING")]
 struct MiPaddingS {
     canary: usize,
-    delta: usize,
+    // encoded block value to check validity of the padding (in case of overflow)
+    delta: usize, // padding bytes before the block. (mi_usable_size(p) - delta == exact allocated bytes)
 }
 
-pub const MI_PADDING_SIZE: usize = 0;
+pub const MI_PADDING_SIZE: isize = 0;
 
 // pub const MI_PADDING_SIZE: usize = 0;
 // const MI_PADDING_WSIZE:usize =
 
-type MiHeapT = MiHeapS;
 // Thread free list.
 // We use the bottom 2 bits of the pointer for mi_delayed_t flags
-type MiThreadFreeT = usize;
+type MiThreadFree = usize;
 
 // The free lists use encoded next fields
 // (Only actually encodes when MI_ENCODED_FREELIST is defined.)
-type MiEncodedT = usize;
+type MiEncoded = usize;
 
-struct MiSegmentsTldT {}
 
-enum MiPageKindT {
+enum MiPageKind {
     // small blocks go into 64kb pages inside a segment
     Small,
     // medium blocks go into 512kb pages inside a segment
@@ -46,8 +56,8 @@ enum MiPageKindT {
     Huge,
 }
 
-struct MiBlockT {
-    next: MiEncodedT,
+struct MiBlock {
+    next: MiEncoded,
 }
 
 // A page contains blocks of one specific size (`block_size`).
@@ -83,7 +93,7 @@ struct MiBlockT {
 //   the owning heap `thread_delayed_free` list. This guarantees that pages
 //   will be freed correctly even if only other threads free blocks.
 #[repr(C)]
-struct MiPageT {
+struct MiPage {
     // index in the segment `pages` array, `page == &segment->pages[page->segment_idx]`
     segment_idx: u8,
     // `true` if the segment allocated this page
@@ -102,36 +112,34 @@ struct MiPageT {
     // number of blocks reserved in memory
     reserved: u16,
     // `in_full` and `has_aligned` flags (8 bits)
-    flags: MiPageFlagsT,
+    flags: MiPageFlags,
     // `true` if the blocks in the free list are zero initialized
     is_zero: bool,
     // expiration count for retired blocks
     retire_expire: u8,
 
     // list of available free blocks (`malloc` allocates from this list)
-    free: &'static MiBlockT,
+    free: &'static MiBlock,
     // two random keys to encode the free lists (see `_mi_block_next`)
     #[cfg(feature = "MI_ENCODE_FREELIST")]
     keys: [usize; 2],
     used: usize,
     xblock_size: usize,
 
-    local_free: &'static MiBlockT,
-    xthread_free: Arc<MiThreadFreeT>,
+    local_free: &'static MiBlock,
+    xthread_free: Arc<MiThreadFree>,
     xheap: AtomicUsize,
 
-    next: &'static MiPageT,
-    prev: &'static MiPageT,
-
+    next: &'static MiPage,
+    prev: &'static MiPage,
 }
-
 
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 // The `in_full` and `has_aligned` page flags are put in a union to efficiently
 // test if both are false (`full_aligned == 0`) in the `mi_free` routine.
-union MiPageFlagsT {
+union MiPageFlags {
     full_aligned: u8,
     x: X,
 }
@@ -142,7 +150,21 @@ struct X {
     has_aligned: bool,
 }
 
-struct MiSegmentS {
+// Pages of a certain block size are held in a queue.
+struct MiPageQueue {
+    first: &'static MiPage,
+    last: &'static MiPage,
+    block_size: usize,
+}
+
+// Random context
+struct MiRandomCxt {
+    input: [usize; 16],
+    output: [usize; 16],
+    output_available: isize,
+}
+
+struct MiSegment {
     memid: usize,
     // id for the os-level memory manager
     mem_is_fixed: bool,
@@ -150,10 +172,10 @@ struct MiSegmentS {
     mem_is_committed: bool, // `true` if the whole segment is eagerly committed
 
     // segment fields
-    next: &'static MiSegmentS,
+    next: &'static MiSegment,
     // must be the first segment field -- see `segment.c:segment_alloc` TODO comment
-    prev: &'static MiSegmentS,
-    abandoned_next: &'static MiSegmentS,
+    prev: &'static MiSegment,
+    abandoned_next: &'static MiSegment,
     abandoned: usize,
     abandoned_visited: usize,
 
@@ -170,21 +192,40 @@ struct MiSegmentS {
     page_shift: usize,
     thread_id: AtomicUsize,
     // volatile _Atomic(uintptr_t)
-    page_kind: MiPageKindT,
+    page_kind: MiPageKind,
 }
 
-struct MiHeapS {
-    tld: &'static MiTldS,
-    // pages_free_direct[],
+const MI_BIN_HUGE: usize = 73;
+const MI_BIN_FULL: usize = MI_BIN_HUGE + 1;
+
+struct MiHeap {
+    tld: &'static MiTld,
+    pages_free_direct: [MiPage; MI_PAGES_DIRECT as usize],
+    pages: [MiPageQueue; MI_BIN_FULL + 1],
+    thread_delayed_free: Arc<&'static MiBlock>,
 }
 
-struct MiTldS {
+// Thread local data
+struct MiTld {
+    // monotonic heartbeat count
     heartbeat: u64,
+    // true if deferred was called; used to prevent infinite recursion.
     recurse: bool,
-    heap_backing: &'static MiHeapT,
-    heaps: &'static MiHeapT,
-
+    // backing heap of this thread (cannot be deleted)
+    heap_backing: &'static MiHeap,
+    // list of heaps in this thread (so we can abandon all when the thread terminates)
+    heaps: &'static MiHeap,
+    // segment tld
+    segments: &'static MiSegmentsTld,
+    // os tld
+    // os:
 }
+
+struct MiSegmentQueue {
+    first: &'static MiSegment,
+}
+
+struct MiSegmentsTld {}
 
 #[cfg(test)]
 mod tests {
