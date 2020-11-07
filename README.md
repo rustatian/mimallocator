@@ -1,4 +1,4 @@
-# mimallocator
+# mimalloc-rs
 This is the educational project. I am trying to rewrite mimalloc allocator [link](https://microsoft.github.io/mimalloc) into the Rust. Let's start the journey :)
 
 Some Rust problems which I got during the implementation:
