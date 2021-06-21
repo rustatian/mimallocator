@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 const MI_SMALL_WSIZE_MAX: isize = 128;
 #[cfg(target_arch = "x86_64")]
@@ -43,7 +43,6 @@ type MiThreadFree = usize;
 // The free lists use encoded next fields
 // (Only actually encodes when MI_ENCODED_FREELIST is defined.)
 type MiEncoded = usize;
-
 
 enum MiPageKind {
     // small blocks go into 64kb pages inside a segment
@@ -133,7 +132,6 @@ struct MiPage {
     next: &'static MiPage,
     prev: &'static MiPage,
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone)]
